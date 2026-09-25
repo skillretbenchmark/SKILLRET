@@ -119,17 +119,6 @@ NUM_GPUS=8 bash scripts/run_eval_rerank.sh
 
 All training scripts load data from the HuggingFace dataset automatically (no manual download needed). Models are specified by their HuggingFace IDs and downloaded on first use.
 
-### Run all training (sequential)
-
-```bash
-nohup bash train/run_all.sh > train/run_all.log 2>&1 &
-```
-
-This runs all three phases sequentially with GPU cleanup between runs:
-1. SkillRet-Embedding-0.6B (~5h on 4x GPU)
-2. SkillRet-Embedding-8B (~16h on 4x GPU)
-3. SkillRet-Reranker-0.6B (~6h on 8x GPU, including hard negative mining from SkillRet-Embedding-0.6B)
-
 ### Embedding model fine-tuning
 
 Fine-tune embedding models with in-batch Multiple Negatives Ranking Loss:
@@ -149,11 +138,11 @@ torchrun --nproc_per_node=4 train/4gpu-qwen3-8b/train.py
 
 ### Reranker fine-tuning
 
-Fine-tune Qwen3-Reranker-0.6B with BCE (yes/no SFT) loss using hard negatives mined from SkillRet-Embedding-0.6B:
+Fine-tune Qwen3-Reranker-0.6B with BCE (yes/no SFT) loss using hard negatives mined from four first-stage retrievers.
 
 #### Step 1: Mine hard negatives
 
-Retrieves the top-100 non-GT candidates per training query and saves the ranked list. Only needs to be done once.
+Retrieves the top-100 non-GT candidates per training query with one embedding model and saves the ranked list. The config fields `embedding_model` and `hard_negatives_file` select the retriever and the output file. For example, with SkillRet-Embedding-0.6B:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python train/reranker-ft/train.py --mine-hard-negatives \
@@ -161,15 +150,17 @@ CUDA_VISIBLE_DEVICES=0 python train/reranker-ft/train.py --mine-hard-negatives \
 # -> saves data/hard_negatives_emb06b.json
 ```
 
+The released reranker uses four such lists, mined with SkillRet-Embedding-0.6B, SkillRet-Embedding-8B, Qwen3-Embedding-8B, and harrier-oss-v1-0.6b. Ranks 21-60 of each list are merged into one candidate pool per query and saved as `data/hard_negatives_4src_merged.json`.
+
 #### Step 2: Train
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 \
-    train/reranker-ft/train.py \
-    --config train/reranker-ft/configs/qwen3-reranker-0.6b-sft-emb06b-best.yaml
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
+    --master_port=29500 train/reranker-ft/train.py \
+    --config train/reranker-ft/configs/qwen3-reranker-0.6b-sft-bce-4src-neg15.yaml
 ```
 
-Key training settings: BCE loss, per-positive grouping, 1 epoch, ~6h on 8× B200.
+Key training settings: BCE loss, per-positive grouping, 15 hard negatives per query, 1 epoch on 4× B200.
 
 ## Pre-trained Models
 
@@ -226,9 +217,8 @@ skillret-benchmark/
 ├── train/                       # Fine-tuning code
 │   ├── 4gpu-qwen3-0.6b/        # SkillRet-Embedding-0.6B training
 │   ├── 4gpu-qwen3-8b/          # SkillRet-Embedding-8B training
-│   ├── reranker-ft/             # SkillRet-Reranker-0.6B SFT training
-│   │   └── configs/             # Training YAML configs
-│   └── run_all.sh               # Run all training sequentially
+│   └── reranker-ft/             # SkillRet-Reranker-0.6B SFT training
+│       └── configs/             # Training YAML configs
 ├── scripts/                     # Evaluation orchestration
 │   ├── run_eval_embedding.sh    # Multi-GPU embedding eval
 │   └── run_eval_rerank.sh       # Multi-GPU reranking eval
